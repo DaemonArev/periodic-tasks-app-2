@@ -11,6 +11,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -105,7 +106,7 @@ class TaskViewModel : ViewModel() {
 // --- ЛОГИКА БУДИЛЬНИКОВ ---
 fun cancelAlarms(context: Context, task: PeriodicTask) {
     val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-    val intent = Intent(context, AlarmReceiver::class.java)
+    val intent = Intent(context, AlarmReceiver::class.java).apply { action = "FIRE_ALARM" }
 
     val piMain = PendingIntent.getBroadcast(context, task.id.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     am.cancel(piMain)
@@ -120,13 +121,12 @@ fun cancelAlarms(context: Context, task: PeriodicTask) {
 
 fun scheduleAlarms(context: Context, task: PeriodicTask) {
     val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-
     val now = LocalDateTime.now()
     var target = now.withHour(task.hour).withMinute(task.minute).withSecond(0).withNano(0)
 
     when (task.type) {
         RecurrenceType.DAILY -> {
-            if (target.isBefore(now)) target = target.plusDays(1)
+            if (target.isBefore(now) || target.isEqual(now)) target = target.plusDays(1)
         }
         RecurrenceType.WEEKLY -> {
             while (target.dayOfWeek.value != task.dayOfWeek || target.isBefore(now)) {
@@ -154,6 +154,7 @@ fun scheduleAlarms(context: Context, task: PeriodicTask) {
 
     fun createBaseIntent(isPre: Boolean, prefix: String = ""): Intent {
         return Intent(context, AlarmReceiver::class.java).apply {
+            action = "FIRE_ALARM" // Обязательный Action, чтобы система не удалила интент
             putExtra("TASK_ID", task.id)
             putExtra("TASK_TITLE", task.title)
             putExtra("TASK_DESC", task.description)
@@ -162,12 +163,19 @@ fun scheduleAlarms(context: Context, task: PeriodicTask) {
         }
     }
 
+    val targetMillis = target.atZone(ZoneId.systemDefault()).toEpochSecond() * 1000
     val piMain = PendingIntent.getBroadcast(
         context, task.id.hashCode(),
         createBaseIntent(false),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
-    am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, target.atZone(ZoneId.systemDefault()).toEpochSecond() * 1000, piMain)
+
+    // Защита от падения, если Android заблокировал права на точные будильники
+    try {
+        am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, targetMillis, piMain)
+    } catch (e: SecurityException) {
+        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, targetMillis, piMain)
+    }
 
     if (task.type == RecurrenceType.EVENT) {
         val preNotifs = listOf(
@@ -184,7 +192,12 @@ fun scheduleAlarms(context: Context, task: PeriodicTask) {
             )
             
             if (isEnabled && preTarget.isAfter(now)) {
-                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, preTarget.atZone(ZoneId.systemDefault()).toEpochSecond() * 1000, piPre)
+                val preMillis = preTarget.atZone(ZoneId.systemDefault()).toEpochSecond() * 1000
+                try {
+                    am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, preMillis, piPre)
+                } catch (e: SecurityException) {
+                    am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, preMillis, piPre)
+                }
             } else {
                 am.cancel(piPre)
             }
@@ -194,73 +207,80 @@ fun scheduleAlarms(context: Context, task: PeriodicTask) {
 
 class AlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        val actionStr = intent.action
         val taskId = intent.getStringExtra("TASK_ID") ?: return
         val title = intent.getStringExtra("TASK_TITLE") ?: "Напоминание"
         val desc = intent.getStringExtra("TASK_DESC") ?: ""
         val isPre = intent.getBooleanExtra("IS_PRE", false)
         val prePrefix = intent.getStringExtra("PRE_PREFIX") ?: ""
-        val intentActionStr = intent.action
 
         val nm = NotificationManagerCompat.from(context)
 
-        if (intentActionStr != null) {
-            when (intentActionStr) {
-                "DONE" -> {
-                    nm.cancel(taskId.hashCode())
-                    return
-                }
-                "SNOOZE_1H" -> {
-                    val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-                    val snoozeIntent = Intent(context, AlarmReceiver::class.java).apply {
-                        putExtra("TASK_ID", taskId)
-                        putExtra("TASK_TITLE", title)
-                        putExtra("TASK_DESC", desc)
-                        putExtra("IS_PRE", isPre)
-                        putExtra("PRE_PREFIX", prePrefix)
-                    }
-                    val pi = PendingIntent.getBroadcast(context, taskId.hashCode() + 99, snoozeIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-                    am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 3600_000L, pi)
-                    nm.cancel(taskId.hashCode())
-                    return
-                }
+        if (actionStr == "DONE") {
+            nm.cancel(taskId.hashCode())
+            return
+        }
+        if (actionStr == "SNOOZE_1H") {
+            val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val snoozeIntent = Intent(context, AlarmReceiver::class.java).apply {
+                action = "FIRE_ALARM"
+                putExtra("TASK_ID", taskId)
+                putExtra("TASK_TITLE", title)
+                putExtra("TASK_DESC", desc)
+                putExtra("IS_PRE", isPre)
+                putExtra("PRE_PREFIX", prePrefix)
             }
+            val pi = PendingIntent.getBroadcast(context, taskId.hashCode() + 99, snoozeIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            try {
+                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 3600_000L, pi)
+            } catch (e: SecurityException) {
+                am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 3600_000L, pi)
+            }
+            nm.cancel(taskId.hashCode())
+            return
         }
 
-        // --- ИЗМЕНЕН ИНДЕНТИФИКАТОР КАНАЛА И ПРИОРИТЕТ ---
-        val channelId = "tasks_default"
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(channelId, "Обычные напоминания", NotificationManager.IMPORTANCE_DEFAULT)
-            nm.createNotificationChannel(channel)
-        }
+        // Если сработал сам таймер
+        if (actionStr == "FIRE_ALARM") {
+            // ДЕБАГ: Показываем Toast на экране, даже если уведомления сломаны
+            Toast.makeText(context, "⏰ Напоминание: $title", Toast.LENGTH_LONG).show()
 
-        val doneIntent = PendingIntent.getBroadcast(context, taskId.hashCode(), Intent(context, AlarmReceiver::class.java).apply { 
-            action = "DONE"
-            putExtra("TASK_ID", taskId)
-            putExtra("IS_PRE", isPre)
-        }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            val channelId = "tasks_default_v2"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = NotificationChannel(channelId, "Обычные напоминания", NotificationManager.IMPORTANCE_DEFAULT)
+                nm.createNotificationChannel(channel)
+            }
 
-        val snoozeIntent = PendingIntent.getBroadcast(context, taskId.hashCode() + 100, Intent(context, AlarmReceiver::class.java).apply { 
-            action = "SNOOZE_1H"
-            putExtra("TASK_ID", taskId)
-            putExtra("TASK_TITLE", title)
-            putExtra("TASK_DESC", desc)
-            putExtra("IS_PRE", isPre)
-            putExtra("PRE_PREFIX", prePrefix)
-        }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            val doneIntent = PendingIntent.getBroadcast(context, taskId.hashCode(), Intent(context, AlarmReceiver::class.java).apply { 
+                action = "DONE"
+                putExtra("TASK_ID", taskId)
+            }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
-        val displayTitle = if (isPre) "$prePrefix$title" else title
+            val snoozeIntent = PendingIntent.getBroadcast(context, taskId.hashCode() + 100, Intent(context, AlarmReceiver::class.java).apply { 
+                action = "SNOOZE_1H"
+                putExtra("TASK_ID", taskId)
+                putExtra("TASK_TITLE", title)
+                putExtra("TASK_DESC", desc)
+                putExtra("IS_PRE", isPre)
+                putExtra("PRE_PREFIX", prePrefix)
+            }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
-        val builder = NotificationCompat.Builder(context, channelId)
-            .setSmallIcon(android.R.drawable.ic_popup_reminder)
-            .setContentTitle(displayTitle)
-            .setContentText(desc)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT) // Снижен приоритет для скрытия всплывающего окна
-            .setAutoCancel(true)
-            .addAction(0, "✅ Сделано", doneIntent)
-            .addAction(0, "⏰ Отложить 1ч", snoozeIntent)
+            val displayTitle = if (isPre) "$prePrefix$title" else title
 
-        if (ActivityCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
-            nm.notify(taskId.hashCode(), builder.build())
+            val builder = NotificationCompat.Builder(context, channelId)
+                .setSmallIcon(android.R.drawable.ic_dialog_info) // Самая надежная иконка системы
+                .setContentTitle(displayTitle)
+                .setContentText(desc)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setAutoCancel(true)
+                .addAction(0, "✅ Сделано", doneIntent)
+                .addAction(0, "⏰ Отложить 1ч", snoozeIntent)
+
+            try {
+                nm.notify(taskId.hashCode(), builder.build())
+            } catch (e: SecurityException) {
+                // Игнорируем краш, если запрет на уровне ОС
+            }
         }
     }
 }
