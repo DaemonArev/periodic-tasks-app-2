@@ -1,41 +1,47 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Аппроксимация белого символа петли с часами и колокольчиком (Вариант C) -->
+<!-- ПОЛНОСТЬЮ ЦЕНТРИРОВАННЫЙ И УВЕЛИЧЕННЫЙ ЛОГОТИП (Вариант C) -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- ВОТ ЗДЕСЬ Я ОБНОВИЛ ТРАНСЛЯЦИЮ ДЛЯ ЦЕНТРИРОВАНИЯ (translateY="25" вместо "39") -->
-    <group android:translateX="13" android:translateY="25">
-        <!-- Соединительная петля (белая) -->
+    
+    <group android:translateX="0" android:translateY="0">
+        <!-- ИСПРАВЛЕННАЯ БЕЛАЯ ТӨЛСТАЯ ПЕТЛЯ ( strokeWidth="6" вместо "2", центры 30,54 и 78,54 ) -->
         <path
             android:fillColor="#00000000"
-            android:pathData="M31.2,1.2 L50.8,1.2 C66.9,1.2 80,14.3 80,30.4 C80,46.5 66.9,59.6 50.8,59.6 L31.2,59.6 C15.1,59.6 2,46.5 2,30.4 C2,14.3 15.1,1.2 31.2,1.2 Z"
+            android:pathData="M30,34 A20,20 0 1,1 30,74 L78,74 A20,20 0 1,1 78,34 L30,34 Z"
             android:strokeColor="#FFFFFF"
             android:strokeLineCap="round"
-            android:strokeWidth="2" />
-        <!-- Часы (левая петля, белые) -->
+            android:strokeWidth="6" />
+
+        <!-- ЧАСЫ (левая петля, центры 30, 54) -->
+        <!-- УВЕЛИЧЕННЫЙ И ЦЕНТРИРОВАННЫЙ БЕЛЫЙ КРУГ ЧАСОВ -->
         <path
             android:fillColor="#FFFFFF"
-            android:pathData="M31.2,30.4m-12.7,0a12.7,12.7 0,1 1,25.4 0a12.7,12.7 0,1 1,-25.4 0" />
-        <!-- Стрелки часов (оранжевые) -->
+            android:pathData="M30,54m-14,0a14,14 0,1 1,28 0a14,14 0,1 1,-28 0" />
+        <!-- УВЕЛИЧЕННЫЕ И ЦЕНТРИРОВАННЫЕ ОРАНЖЕВЫЕ СТРЕЛКИ ( strokeWidth="3" ) -->
         <path
             android:fillColor="#00000000"
-            android:pathData="M31.2,30.4 L31.2,24"
+            android:pathData="M30,54 L30,48"
             android:strokeColor="#FF9800"
             android:strokeLineCap="round"
-            android:strokeWidth="1.5" />
+            android:strokeWidth="3" />
         <path
             android:fillColor="#00000000"
-            android:pathData="M31.2,30.4 L36.2,30.4"
+            android:pathData="M30,54 L36,54"
             android:strokeColor="#FF9800"
             android:strokeLineCap="round"
-            android:strokeWidth="1.5" />
+            android:strokeWidth="3" />
         
-        <!-- Колокольчик (правая петля, белый) -->
+        <!-- КОЛОКОЛЬЧИК (правая петля, центры 78, 54) -->
+        <!-- УВЕЛИЧЕННЫЙ И ЦЕНТРИРОВАННЫЙ БЕЛЫЙ КРУГ КОЛОКОЛЬЧИКА -->
         <path
             android:fillColor="#FFFFFF"
-            android:pathData="M50.8,30.4m-12.7,0a12.7,12.7 0,1 1,25.4 0a12.7,12.7 0,1 1,-25.4 0" />
-        <path android:fillColor="#FFFFFF" android:pathData="M50.8,24.1 C48.9,24.1 47.3,25.7 47.3,27.6 L47.3,34.4 L43.9,37.8 L43.9,39.2 L57.7,39.2 L57.7,37.8 L54.3,34.4 L54.3,27.6 C54.3,25.7 52.7,24.1 54.3,24.1 Z M50.8,40.6 C50.8,40.6 51.1,40.6 51.4,40.6 M50.8,40.6 C50.8,40.6 50.5,40.6 50.2,40.6 M51.4,40.6 C51.4,41.4 50.8,42.1 50.8,42.1 C50.8,42.1 50.2,41.4 50.2,40.6 L50.2,40.6 M51.4,40.6 L51.4,40.6 L51.4,40.6 Z" />
+            android:pathData="M78,54m-14,0a14,14 0,1 1,28 0a14,14 0,1 1,-28 0" />
+        <!-- МАСШТАБИРОВАННЫЙ И ЦЕНТРИРОВАННЫЙ БЕЛЫЙ КОЛОКОЛЬЧИК -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M78,44 C75,44 73,46 73,48 L73,62 L68,67 L68,69 L88,69 L88,67 L83,62 L83,48 C83,46 81,44 78,44 Z M78,71 C78,71 78.3,71 78.6,71 M78,71 C78,71 77.7,71 77.4,71 M78.6,71 C78.6,72.2 78,73 78,73 C78,73 77.4,72.2 77.4,71 Z" />
     </group>
 </vector>
