@@ -1,4 +1,4 @@
-STREAMING_CHUNK:Setting up workflow triggers and environment...name: Build Android APKon:push:branches: [ "main", "master" ]workflow_dispatch:jobs:build:runs-on: ubuntu-lateststeps:
+steps:
   - name: Checkout Repository
     uses: actions/checkout@v4
 
