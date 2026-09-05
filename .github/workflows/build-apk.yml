@@ -1,0 +1,33 @@
+STREAMING_CHUNK:Setting up workflow triggers and environment...name: Build Android APKon:push:branches: [ "main", "master" ]workflow_dispatch:jobs:build:runs-on: ubuntu-lateststeps:
+  - name: Checkout Repository
+    uses: actions/checkout@v4
+
+  # STREAMING_CHUNK:Configuring JDK 17 for Android build...
+  - name: Set up JDK 17
+    uses: actions/setup-java@v4
+    with:
+      java-version: '17'
+      distribution: 'temurin'
+      cache: gradle
+
+  # STREAMING_CHUNK:Setting up Gradle execution permissions...
+  - name: Grant execute permission for gradlew
+    run: |
+      if [ -f "gradlew" ]; then
+        chmod +x gradlew
+      else
+        gradle wrapper
+        chmod +x gradlew
+      fi
+
+  # STREAMING_CHUNK:Running Gradle build task for debug APK...
+  - name: Build Debug APK with Gradle
+    run: ./gradlew assembleDebug --stacktrace
+
+  # STREAMING_CHUNK:Uploading generated APK artifact for download...
+  - name: Upload APK Artifact
+    uses: actions/upload-artifact@v4
+    with:
+      name: PeriodicTasks-debug-apk
+      path: app/build/outputs/apk/debug/*.apk
+      retention-days: 14
