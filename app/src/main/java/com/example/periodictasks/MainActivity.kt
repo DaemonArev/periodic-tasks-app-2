@@ -29,6 +29,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -49,6 +51,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.time.Instant
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.util.UUID
@@ -87,6 +90,17 @@ class TaskViewModel : ViewModel() {
         scheduleAlarms(context, task)
     }
 
+    fun updateTask(task: PeriodicTask, context: Context) {
+        _tasks.value = _tasks.value.map { if (it.id == task.id) task else it }
+        scheduleAlarms(context, task)
+    }
+
+    fun deleteTask(taskId: String, context: Context) {
+        val task = _tasks.value.find { it.id == taskId }
+        _tasks.value = _tasks.value.filter { it.id != taskId }
+        task?.let { cancelAlarms(context, it) }
+    }
+
     fun completeTask(taskId: String, context: Context) {
         val task = _tasks.value.find { it.id == taskId } ?: return
         scheduleAlarms(context, task)
@@ -94,6 +108,21 @@ class TaskViewModel : ViewModel() {
 }
 
 // --- ЛОГИКА БУДИЛЬНИКОВ ---
+fun cancelAlarms(context: Context, task: PeriodicTask) {
+    val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    val intent = Intent(context, AlarmReceiver::class.java)
+
+    val piMain = PendingIntent.getBroadcast(context, task.id.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    am.cancel(piMain)
+
+    if (task.type == RecurrenceType.EVENT) {
+        for (i in 1..3) {
+            val piPre = PendingIntent.getBroadcast(context, task.id.hashCode() + i, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            am.cancel(piPre)
+        }
+    }
+}
+
 fun scheduleAlarms(context: Context, task: PeriodicTask) {
     val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
 
@@ -138,7 +167,6 @@ fun scheduleAlarms(context: Context, task: PeriodicTask) {
         }
     }
 
-    // 1. Основной будильник (В саму дату)
     val piMain = PendingIntent.getBroadcast(
         context, task.id.hashCode(),
         createBaseIntent(false),
@@ -146,7 +174,6 @@ fun scheduleAlarms(context: Context, task: PeriodicTask) {
     )
     am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, target.atZone(ZoneId.systemDefault()).toEpochSecond() * 1000, piMain)
 
-    // 2. Заблаговременные будильники (Только для Событий)
     if (task.type == RecurrenceType.EVENT) {
         val preNotifs = listOf(
             Triple(task.notifyMonthBefore, target.minusMonths(1), "Скоро событие (через месяц): "),
@@ -250,7 +277,6 @@ class MainActivity : ComponentActivity() {
             requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
-        // Инициализация ViewModel стандартным способом Android
         val taskViewModel = ViewModelProvider(this)[TaskViewModel::class.java]
 
         setContent {
@@ -265,6 +291,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun PeriodicTasksApp(taskViewModel: TaskViewModel) {
     var showAddSheet by remember { mutableStateOf(false) }
+    var taskToEdit by remember { mutableStateOf<PeriodicTask?>(null) }
     val tasks by taskViewModel.tasks.collectAsState()
     val context = LocalContext.current
 
@@ -279,7 +306,10 @@ fun PeriodicTasksApp(taskViewModel: TaskViewModel) {
         },
         floatingActionButton = {
             LargeFloatingActionButton(
-                onClick = { showAddSheet = true },
+                onClick = { 
+                    taskToEdit = null
+                    showAddSheet = true 
+                },
                 containerColor = MaterialTheme.colorScheme.tertiaryContainer,
                 shape = RoundedCornerShape(28.dp)
             ) {
@@ -293,7 +323,16 @@ fun PeriodicTasksApp(taskViewModel: TaskViewModel) {
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             items(tasks) { task ->
-                TaskCard(task)
+                TaskCard(
+                    task = task,
+                    onEdit = {
+                        taskToEdit = task
+                        showAddSheet = true
+                    },
+                    onDelete = {
+                        taskViewModel.deleteTask(task.id, context)
+                    }
+                )
             }
         }
 
@@ -304,8 +343,13 @@ fun PeriodicTasksApp(taskViewModel: TaskViewModel) {
                 shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp)
             ) {
                 AddWizard(
+                    initialTask = taskToEdit,
                     onSave = { newTask ->
-                        taskViewModel.addTask(newTask, context)
+                        if (taskToEdit == null) {
+                            taskViewModel.addTask(newTask, context)
+                        } else {
+                            taskViewModel.updateTask(newTask, context)
+                        }
                         showAddSheet = false
                     },
                     onCancel = { showAddSheet = false }
@@ -317,20 +361,36 @@ fun PeriodicTasksApp(taskViewModel: TaskViewModel) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AddWizard(onSave: (PeriodicTask) -> Unit, onCancel: () -> Unit) {
+fun AddWizard(initialTask: PeriodicTask?, onSave: (PeriodicTask) -> Unit, onCancel: () -> Unit) {
     var step by remember { mutableIntStateOf(0) }
     
-    var title by remember { mutableStateOf("") }
-    var desc by remember { mutableStateOf("") }
-    var type by remember { mutableStateOf(RecurrenceType.DAILY) }
-    var dayOfMonth by remember { mutableStateOf(1) }
-    var selectedDateMillis by remember { mutableStateOf<Long?>(null) }
+    var title by remember { mutableStateOf(initialTask?.title ?: "") }
+    var desc by remember { mutableStateOf(initialTask?.description ?: "") }
+    var type by remember { mutableStateOf(initialTask?.type ?: RecurrenceType.DAILY) }
+    var dayOfMonth by remember { mutableStateOf(initialTask?.dayOfMonth ?: 1) }
     
-    val timePickerState = rememberTimePickerState(initialHour = 9, initialMinute = 0, is24Hour = true)
+    val initialDateMillis = remember(initialTask) {
+        if (initialTask?.type == RecurrenceType.YEARLY || initialTask?.type == RecurrenceType.EVENT) {
+            try {
+                val year = LocalDate.now().year
+                LocalDate.of(year, initialTask.monthOfYear, initialTask.dayOfMonth)
+                    .atStartOfDay(ZoneId.of("UTC"))
+                    .toInstant()
+                    .toEpochMilli()
+            } catch (e: Exception) { null }
+        } else null
+    }
+    var selectedDateMillis by remember { mutableStateOf<Long?>(initialDateMillis) }
     
-    var notifyMonth by remember { mutableStateOf(false) }
-    var notifyTwoWeeks by remember { mutableStateOf(false) }
-    var notifyWeek by remember { mutableStateOf(false) }
+    val timePickerState = rememberTimePickerState(
+        initialHour = initialTask?.hour ?: 9,
+        initialMinute = initialTask?.minute ?: 0,
+        is24Hour = true
+    )
+    
+    var notifyMonth by remember { mutableStateOf(initialTask?.notifyMonthBefore ?: false) }
+    var notifyTwoWeeks by remember { mutableStateOf(initialTask?.notifyTwoWeeksBefore ?: false) }
+    var notifyWeek by remember { mutableStateOf(initialTask?.notifyWeekBefore ?: false) }
 
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp).navigationBarsPadding()) {
         AnimatedContent(
@@ -341,7 +401,7 @@ fun AddWizard(onSave: (PeriodicTask) -> Unit, onCancel: () -> Unit) {
             when (currentStep) {
                 0 -> {
                     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                        Text("Создать напоминание", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                        Text(if (initialTask == null) "Создать напоминание" else "Редактировать", fontSize = 24.sp, fontWeight = FontWeight.Bold)
                         OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("Название") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp))
                         OutlinedTextField(value = desc, onValueChange = { desc = it }, label = { Text("Описание (опционально)") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp))
                         
@@ -382,7 +442,7 @@ fun AddWizard(onSave: (PeriodicTask) -> Unit, onCancel: () -> Unit) {
                                 }
                             }
                             RecurrenceType.YEARLY, RecurrenceType.EVENT -> {
-                                val dateState = rememberDatePickerState()
+                                val dateState = rememberDatePickerState(initialSelectedDateMillis = selectedDateMillis)
                                 selectedDateMillis = dateState.selectedDateMillis
                                 DatePicker(state = dateState, title = null, headline = null, showModeToggle = false)
                             }
@@ -439,6 +499,7 @@ fun AddWizard(onSave: (PeriodicTask) -> Unit, onCancel: () -> Unit) {
                         
                         onSave(
                             PeriodicTask(
+                                id = initialTask?.id ?: UUID.randomUUID().toString(),
                                 title = title.ifEmpty { "Без названия" },
                                 description = desc,
                                 type = type,
@@ -463,7 +524,7 @@ fun AddWizard(onSave: (PeriodicTask) -> Unit, onCancel: () -> Unit) {
 }
 
 @Composable
-fun TaskCard(task: PeriodicTask) {
+fun TaskCard(task: PeriodicTask, onEdit: () -> Unit, onDelete: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
@@ -484,6 +545,12 @@ fun TaskCard(task: PeriodicTask) {
                         fontSize = 14.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.primary
                     )
                 }
+            }
+            IconButton(onClick = onEdit) {
+                Icon(Icons.Default.Edit, contentDescription = "Редактировать", tint = MaterialTheme.colorScheme.primary)
+            }
+            IconButton(onClick = onDelete) {
+                Icon(Icons.Default.Delete, contentDescription = "Удалить", tint = MaterialTheme.colorScheme.error)
             }
         }
     }
