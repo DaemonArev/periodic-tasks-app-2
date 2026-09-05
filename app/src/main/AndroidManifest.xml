@@ -1,0 +1,37 @@
+<!-- Permissions for Android 13+ and Android 17 notifications and alarms -->
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+<uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+<uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+<uses-permission android:name="android.permission.WAKE_LOCK" />
+<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+<application
+    android:allowBackup="true"
+    android:icon="@mipmap/ic_launcher"
+    android:label="Регулярные дела"
+    android:roundIcon="@mipmap/ic_launcher_round"
+    android:supportsRtl="true"
+    android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+    <activity
+        android:name=".MainActivity"
+        android:exported="true">
+        <intent-filter>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent-filter>
+    </activity>
+
+    <!-- Broadcast receiver for triggering notification and snooze actions -->
+    <receiver
+        android:name=".TaskNotificationReceiver"
+        android:exported="false">
+        <intent-filter>
+            <action android:name="com.example.periodictasks.ACTION_TRIGGER_TASK" />
+            <action android:name="com.example.periodictasks.ACTION_SNOOZE_1_HOUR" />
+            <action android:name="com.example.periodictasks.ACTION_SNOOZE_1_DAY" />
+            <action android:name="com.example.periodictasks.ACTION_MARK_DONE" />
+        </intent-filter>
+    </receiver>
+
+</application>
