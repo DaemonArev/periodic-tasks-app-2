@@ -44,7 +44,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.ViewModelProvider
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -250,9 +250,12 @@ class MainActivity : ComponentActivity() {
             requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
+        // Инициализация ViewModel стандартным способом Android
+        val taskViewModel = ViewModelProvider(this)[TaskViewModel::class.java]
+
         setContent {
             MaterialTheme(colorScheme = dynamicLightColorScheme(LocalContext.current)) {
-                PeriodicTasksApp()
+                PeriodicTasksApp(taskViewModel)
             }
         }
     }
@@ -260,7 +263,7 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PeriodicTasksApp(taskViewModel: TaskViewModel = viewModel()) {
+fun PeriodicTasksApp(taskViewModel: TaskViewModel) {
     var showAddSheet by remember { mutableStateOf(false) }
     val tasks by taskViewModel.tasks.collectAsState()
     val context = LocalContext.current
