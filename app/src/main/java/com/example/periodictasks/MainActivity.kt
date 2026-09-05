@@ -108,12 +108,12 @@ fun cancelAlarms(context: Context, task: PeriodicTask) {
     val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
     val intent = Intent(context, AlarmReceiver::class.java).apply { action = "FIRE_ALARM" }
 
-    val piMain = PendingIntent.getBroadcast(context, task.id.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    val piMain = PendingIntent.getBroadcast(context, task.id.hashCode() and 0x7FFFFFFF, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     am.cancel(piMain)
 
     if (task.type == RecurrenceType.EVENT) {
         for (i in 1..3) {
-            val piPre = PendingIntent.getBroadcast(context, task.id.hashCode() + i, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            val piPre = PendingIntent.getBroadcast(context, (task.id.hashCode() + i) and 0x7FFFFFFF, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
             am.cancel(piPre)
         }
     }
@@ -154,7 +154,7 @@ fun scheduleAlarms(context: Context, task: PeriodicTask) {
 
     fun createBaseIntent(isPre: Boolean, prefix: String = ""): Intent {
         return Intent(context, AlarmReceiver::class.java).apply {
-            action = "FIRE_ALARM" // Обязательный Action, чтобы система не удалила интент
+            action = "FIRE_ALARM"
             putExtra("TASK_ID", task.id)
             putExtra("TASK_TITLE", task.title)
             putExtra("TASK_DESC", task.description)
@@ -163,18 +163,19 @@ fun scheduleAlarms(context: Context, task: PeriodicTask) {
         }
     }
 
+    val piShowApp = PendingIntent.getActivity(context, 0, Intent(context, MainActivity::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     val targetMillis = target.atZone(ZoneId.systemDefault()).toEpochSecond() * 1000
     val piMain = PendingIntent.getBroadcast(
-        context, task.id.hashCode(),
+        context, task.id.hashCode() and 0x7FFFFFFF,
         createBaseIntent(false),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
 
-    // Защита от падения, если Android заблокировал права на точные будильники
+    // ИСПОЛЬЗУЕМ СИСТЕМНЫЙ БУДИЛЬНИК ДЛЯ ОБХОДА БЛОКИРОВОК
     try {
-        am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, targetMillis, piMain)
+        am.setAlarmClock(AlarmManager.AlarmClockInfo(targetMillis, piShowApp), piMain)
     } catch (e: SecurityException) {
-        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, targetMillis, piMain)
+        am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, targetMillis, piMain)
     }
 
     if (task.type == RecurrenceType.EVENT) {
@@ -185,21 +186,14 @@ fun scheduleAlarms(context: Context, task: PeriodicTask) {
         )
         
         preNotifs.forEachIndexed { index, (isEnabled, preTarget, prefix) ->
-            val piPre = PendingIntent.getBroadcast(
-                context, task.id.hashCode() + index + 1,
-                createBaseIntent(true, prefix),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            
             if (isEnabled && preTarget.isAfter(now)) {
                 val preMillis = preTarget.atZone(ZoneId.systemDefault()).toEpochSecond() * 1000
+                val piPre = PendingIntent.getBroadcast(context, (task.id.hashCode() + index + 1) and 0x7FFFFFFF, createBaseIntent(true, prefix), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
                 try {
-                    am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, preMillis, piPre)
+                    am.setAlarmClock(AlarmManager.AlarmClockInfo(preMillis, piShowApp), piPre)
                 } catch (e: SecurityException) {
-                    am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, preMillis, piPre)
+                    am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, preMillis, piPre)
                 }
-            } else {
-                am.cancel(piPre)
             }
         }
     }
@@ -230,33 +224,33 @@ class AlarmReceiver : BroadcastReceiver() {
                 putExtra("IS_PRE", isPre)
                 putExtra("PRE_PREFIX", prePrefix)
             }
-            val pi = PendingIntent.getBroadcast(context, taskId.hashCode() + 99, snoozeIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            val pi = PendingIntent.getBroadcast(context, (taskId.hashCode() + 99) and 0x7FFFFFFF, snoozeIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            val piShowApp = PendingIntent.getActivity(context, 0, Intent(context, MainActivity::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            
             try {
-                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 3600_000L, pi)
+                am.setAlarmClock(AlarmManager.AlarmClockInfo(System.currentTimeMillis() + 3600_000L, piShowApp), pi)
             } catch (e: SecurityException) {
-                am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 3600_000L, pi)
+                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 3600_000L, pi)
             }
             nm.cancel(taskId.hashCode())
             return
         }
 
-        // Если сработал сам таймер
         if (actionStr == "FIRE_ALARM") {
-            // ДЕБАГ: Показываем Toast на экране, даже если уведомления сломаны
-            Toast.makeText(context, "⏰ Напоминание: $title", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "⏰ $title", Toast.LENGTH_LONG).show()
 
-            val channelId = "tasks_default_v2"
+            val channelId = "tasks_default_v3"
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val channel = NotificationChannel(channelId, "Обычные напоминания", NotificationManager.IMPORTANCE_DEFAULT)
+                val channel = NotificationChannel(channelId, "Напоминания", NotificationManager.IMPORTANCE_DEFAULT)
                 nm.createNotificationChannel(channel)
             }
 
-            val doneIntent = PendingIntent.getBroadcast(context, taskId.hashCode(), Intent(context, AlarmReceiver::class.java).apply { 
+            val doneIntent = PendingIntent.getBroadcast(context, taskId.hashCode() and 0x7FFFFFFF, Intent(context, AlarmReceiver::class.java).apply { 
                 action = "DONE"
                 putExtra("TASK_ID", taskId)
             }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
-            val snoozeIntent = PendingIntent.getBroadcast(context, taskId.hashCode() + 100, Intent(context, AlarmReceiver::class.java).apply { 
+            val snoozeIntent = PendingIntent.getBroadcast(context, (taskId.hashCode() + 100) and 0x7FFFFFFF, Intent(context, AlarmReceiver::class.java).apply { 
                 action = "SNOOZE_1H"
                 putExtra("TASK_ID", taskId)
                 putExtra("TASK_TITLE", title)
@@ -268,7 +262,7 @@ class AlarmReceiver : BroadcastReceiver() {
             val displayTitle = if (isPre) "$prePrefix$title" else title
 
             val builder = NotificationCompat.Builder(context, channelId)
-                .setSmallIcon(android.R.drawable.ic_dialog_info) // Самая надежная иконка системы
+                .setSmallIcon(android.R.drawable.sym_def_app_icon)
                 .setContentTitle(displayTitle)
                 .setContentText(desc)
                 .setPriority(NotificationCompat.PRIORITY_DEFAULT)
@@ -277,9 +271,11 @@ class AlarmReceiver : BroadcastReceiver() {
                 .addAction(0, "⏰ Отложить 1ч", snoozeIntent)
 
             try {
-                nm.notify(taskId.hashCode(), builder.build())
-            } catch (e: SecurityException) {
-                // Игнорируем краш, если запрет на уровне ОС
+                if (ActivityCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+                    nm.notify(taskId.hashCode(), builder.build())
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
     }
@@ -316,6 +312,20 @@ fun PeriodicTasksApp(taskViewModel: TaskViewModel) {
         topBar = {
             CenterAlignedTopAppBar(
                 title = { Text("Мои Задачи", fontWeight = FontWeight.Bold) },
+                actions = {
+                    // КНОПКА МГНОВЕННОГО ТЕСТА УВЕДОМЛЕНИЙ
+                    IconButton(onClick = {
+                        val intent = Intent(context, AlarmReceiver::class.java).apply {
+                            action = "FIRE_ALARM"
+                            putExtra("TASK_ID", "test_id")
+                            putExtra("TASK_TITLE", "Тест связи \uD83D\uDC4B")
+                            putExtra("TASK_DESC", "Если вы это видите, уведомления работают!")
+                        }
+                        context.sendBroadcast(intent)
+                    }) {
+                        Icon(Icons.Filled.Notifications, contentDescription = "Test Notification")
+                    }
+                },
                 colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer
                 )
@@ -340,16 +350,7 @@ fun PeriodicTasksApp(taskViewModel: TaskViewModel) {
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             items(tasks) { task ->
-                TaskCard(
-                    task = task,
-                    onEdit = {
-                        taskToEdit = task
-                        showAddSheet = true
-                    },
-                    onDelete = {
-                        taskViewModel.deleteTask(task.id, context)
-                    }
-                )
+                TaskCard(task = task, onEdit = { taskToEdit = task; showAddSheet = true }, onDelete = { taskViewModel.deleteTask(task.id, context) })
             }
         }
 
@@ -362,11 +363,8 @@ fun PeriodicTasksApp(taskViewModel: TaskViewModel) {
                 AddWizard(
                     initialTask = taskToEdit,
                     onSave = { newTask ->
-                        if (taskToEdit == null) {
-                            taskViewModel.addTask(newTask, context)
-                        } else {
-                            taskViewModel.updateTask(newTask, context)
-                        }
+                        if (taskToEdit == null) taskViewModel.addTask(newTask, context)
+                        else taskViewModel.updateTask(newTask, context)
                         showAddSheet = false
                     },
                     onCancel = { showAddSheet = false }
@@ -380,7 +378,6 @@ fun PeriodicTasksApp(taskViewModel: TaskViewModel) {
 @Composable
 fun AddWizard(initialTask: PeriodicTask?, onSave: (PeriodicTask) -> Unit, onCancel: () -> Unit) {
     var step by remember { mutableIntStateOf(0) }
-    
     var title by remember { mutableStateOf(initialTask?.title ?: "") }
     var desc by remember { mutableStateOf(initialTask?.description ?: "") }
     var type by remember { mutableStateOf(initialTask?.type ?: RecurrenceType.DAILY) }
@@ -390,45 +387,30 @@ fun AddWizard(initialTask: PeriodicTask?, onSave: (PeriodicTask) -> Unit, onCanc
         if (initialTask?.type == RecurrenceType.YEARLY || initialTask?.type == RecurrenceType.EVENT) {
             try {
                 val year = LocalDate.now().year
-                LocalDate.of(year, initialTask.monthOfYear, initialTask.dayOfMonth)
-                    .atStartOfDay(ZoneId.of("UTC"))
-                    .toInstant()
-                    .toEpochMilli()
+                LocalDate.of(year, initialTask.monthOfYear, initialTask.dayOfMonth).atStartOfDay(ZoneId.of("UTC")).toInstant().toEpochMilli()
             } catch (e: Exception) { null }
         } else null
     }
     var selectedDateMillis by remember { mutableStateOf<Long?>(initialDateMillis) }
-    
-    val timePickerState = rememberTimePickerState(
-        initialHour = initialTask?.hour ?: 9,
-        initialMinute = initialTask?.minute ?: 0,
-        is24Hour = true
-    )
+    val timePickerState = rememberTimePickerState(initialHour = initialTask?.hour ?: 9, initialMinute = initialTask?.minute ?: 0, is24Hour = true)
     
     var notifyMonth by remember { mutableStateOf(initialTask?.notifyMonthBefore ?: false) }
     var notifyTwoWeeks by remember { mutableStateOf(initialTask?.notifyTwoWeeksBefore ?: false) }
     var notifyWeek by remember { mutableStateOf(initialTask?.notifyWeekBefore ?: false) }
 
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp).navigationBarsPadding()) {
-        AnimatedContent(
-            targetState = step,
-            transitionSpec = { slideInHorizontally(tween(300)) { it } togetherWith slideOutHorizontally(tween(300)) { -it } },
-            label = "wizard_animation"
-        ) { currentStep ->
+        AnimatedContent(targetState = step, transitionSpec = { slideInHorizontally(tween(300)) { it } togetherWith slideOutHorizontally(tween(300)) { -it } }, label = "wizard_animation") { currentStep ->
             when (currentStep) {
                 0 -> {
                     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                         Text(if (initialTask == null) "Создать напоминание" else "Редактировать", fontSize = 24.sp, fontWeight = FontWeight.Bold)
                         OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("Название") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp))
                         OutlinedTextField(value = desc, onValueChange = { desc = it }, label = { Text("Описание (опционально)") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp))
-                        
                         Text("Повторять:", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp))
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             RecurrenceType.entries.forEach { recType ->
                                 Row(
-                                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                                        .background(if (type == recType) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)
-                                        .clickable { type = recType }.padding(16.dp),
+                                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(if (type == recType) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant).clickable { type = recType }.padding(16.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(recType.title, fontWeight = if (type == recType) FontWeight.Bold else FontWeight.Normal)
@@ -447,12 +429,7 @@ fun AddWizard(initialTask: PeriodicTask?, onSave: (PeriodicTask) -> Unit, onCanc
                                 Text("Каждое число месяца:")
                                 LazyVerticalGrid(columns = GridCells.Fixed(7), modifier = Modifier.height(250.dp)) {
                                     items((1..31).toList()) { day ->
-                                        Box(
-                                            modifier = Modifier.padding(4.dp).aspectRatio(1f).clip(CircleShape)
-                                                .background(if (dayOfMonth == day) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
-                                                .clickable { dayOfMonth = day },
-                                            contentAlignment = Alignment.Center
-                                        ) {
+                                        Box(modifier = Modifier.padding(4.dp).aspectRatio(1f).clip(CircleShape).background(if (dayOfMonth == day) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant).clickable { dayOfMonth = day }, contentAlignment = Alignment.Center) {
                                             Text(day.toString(), color = if (dayOfMonth == day) Color.White else MaterialTheme.colorScheme.onSurface)
                                         }
                                     }
@@ -476,99 +453,52 @@ fun AddWizard(initialTask: PeriodicTask?, onSave: (PeriodicTask) -> Unit, onCanc
                 3 -> {
                     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                         Text("Заранее напомнить?", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(checked = notifyMonth, onCheckedChange = { notifyMonth = it })
-                            Text("За 1 месяц")
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(checked = notifyTwoWeeks, onCheckedChange = { notifyTwoWeeks = it })
-                            Text("За 2 недели")
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(checked = notifyWeek, onCheckedChange = { notifyWeek = it })
-                            Text("За 1 неделю")
-                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(checked = notifyMonth, onCheckedChange = { notifyMonth = it }); Text("За 1 месяц") }
+                        Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(checked = notifyTwoWeeks, onCheckedChange = { notifyTwoWeeks = it }); Text("За 2 недели") }
+                        Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(checked = notifyWeek, onCheckedChange = { notifyWeek = it }); Text("За 1 неделю") }
                     }
                 }
             }
         }
-
         Spacer(modifier = Modifier.height(32.dp))
         Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-            TextButton(onClick = { if (step > 0) step-- else onCancel() }) {
-                Text(if (step == 0) "Отмена" else "Назад", fontSize = 16.sp)
-            }
-            
+            TextButton(onClick = { if (step > 0) step-- else onCancel() }) { Text(if (step == 0) "Отмена" else "Назад", fontSize = 16.sp) }
             val isLastStep = (type != RecurrenceType.EVENT && step == 2) || (type == RecurrenceType.EVENT && step == 3)
-            
             Button(
                 onClick = {
                     if (type == RecurrenceType.DAILY && step == 0) step = 2 
                     else if (!isLastStep) step++
                     else {
-                        var finalMonth = 1
-                        var finalDay = 1
+                        var finalMonth = 1; var finalDay = 1
                         if (selectedDateMillis != null) {
                             val dt = Instant.ofEpochMilli(selectedDateMillis!!).atZone(ZoneId.of("UTC")).toLocalDate()
-                            finalMonth = dt.monthValue
-                            finalDay = dt.dayOfMonth
+                            finalMonth = dt.monthValue; finalDay = dt.dayOfMonth
                         }
-                        
-                        onSave(
-                            PeriodicTask(
-                                id = initialTask?.id ?: UUID.randomUUID().toString(),
-                                title = title.ifEmpty { "Без названия" },
-                                description = desc,
-                                type = type,
-                                dayOfMonth = if (type == RecurrenceType.MONTHLY) dayOfMonth else finalDay,
-                                monthOfYear = finalMonth,
-                                hour = timePickerState.hour,
-                                minute = timePickerState.minute,
-                                notifyMonthBefore = notifyMonth,
-                                notifyTwoWeeksBefore = notifyTwoWeeks,
-                                notifyWeekBefore = notifyWeek
-                            )
-                        )
+                        onSave(PeriodicTask(id = initialTask?.id ?: UUID.randomUUID().toString(), title = title.ifEmpty { "Без названия" }, description = desc, type = type, dayOfMonth = if (type == RecurrenceType.MONTHLY) dayOfMonth else finalDay, monthOfYear = finalMonth, hour = timePickerState.hour, minute = timePickerState.minute, notifyMonthBefore = notifyMonth, notifyTwoWeeksBefore = notifyTwoWeeks, notifyWeekBefore = notifyWeek))
                     }
                 },
-                shape = RoundedCornerShape(16.dp),
-                enabled = title.isNotBlank() || step > 0
-            ) {
-                Text(if (isLastStep) "Сохранить" else "Далее", fontSize = 16.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
-            }
+                shape = RoundedCornerShape(16.dp), enabled = title.isNotBlank() || step > 0
+            ) { Text(if (isLastStep) "Сохранить" else "Далее", fontSize = 16.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) }
         }
     }
 }
 
 @Composable
 fun TaskCard(task: PeriodicTask, onEdit: () -> Unit, onDelete: () -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
-    ) {
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
         Row(modifier = Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(task.title, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                if (task.description.isNotBlank()) {
-                    Text(task.description, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f), modifier = Modifier.padding(top = 4.dp))
-                }
+                if (task.description.isNotBlank()) Text(task.description, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f), modifier = Modifier.padding(top = 4.dp))
                 Spacer(modifier = Modifier.height(12.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.Notifications, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "${task.type.title} • ${String.format("%02d:%02d", task.hour, task.minute)}",
-                        fontSize = 14.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.primary
-                    )
+                    Text(text = "${task.type.title} • ${String.format("%02d:%02d", task.hour, task.minute)}", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.primary)
                 }
             }
-            IconButton(onClick = onEdit) {
-                Icon(Icons.Default.Edit, contentDescription = "Редактировать", tint = MaterialTheme.colorScheme.primary)
-            }
-            IconButton(onClick = onDelete) {
-                Icon(Icons.Default.Delete, contentDescription = "Удалить", tint = MaterialTheme.colorScheme.error)
-            }
+            IconButton(onClick = onEdit) { Icon(Icons.Default.Edit, contentDescription = "Редактировать", tint = MaterialTheme.colorScheme.primary) }
+            IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, contentDescription = "Удалить", tint = MaterialTheme.colorScheme.error) }
         }
     }
 }
