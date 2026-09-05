@@ -5,7 +5,8 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <group android:translateX="13" android:translateY="39">
+    <!-- ВОТ ЗДЕСЬ Я ОБНОВИЛ ТРАНСЛЯЦИЮ ДЛЯ ЦЕНТРИРОВАНИЯ (translateY="25" вместо "39") -->
+    <group android:translateX="13" android:translateY="25">
         <!-- Соединительная петля (белая) -->
         <path
             android:fillColor="#00000000"
