@@ -100,11 +100,6 @@ class TaskViewModel : ViewModel() {
         _tasks.value = _tasks.value.filter { it.id != taskId }
         task?.let { cancelAlarms(context, it) }
     }
-
-    fun completeTask(taskId: String, context: Context) {
-        val task = _tasks.value.find { it.id == taskId } ?: return
-        scheduleAlarms(context, task)
-    }
 }
 
 // --- ЛОГИКА БУДИЛЬНИКОВ ---
@@ -231,8 +226,10 @@ class AlarmReceiver : BroadcastReceiver() {
             }
         }
 
+        // --- ИЗМЕНЕН ИНДЕНТИФИКАТОР КАНАЛА И ПРИОРИТЕТ ---
+        val channelId = "tasks_default"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel("tasks", "Задачи", NotificationManager.IMPORTANCE_HIGH)
+            val channel = NotificationChannel(channelId, "Обычные напоминания", NotificationManager.IMPORTANCE_DEFAULT)
             nm.createNotificationChannel(channel)
         }
 
@@ -253,11 +250,11 @@ class AlarmReceiver : BroadcastReceiver() {
 
         val displayTitle = if (isPre) "$prePrefix$title" else title
 
-        val builder = NotificationCompat.Builder(context, "tasks")
+        val builder = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(android.R.drawable.ic_popup_reminder)
             .setContentTitle(displayTitle)
             .setContentText(desc)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT) // Снижен приоритет для скрытия всплывающего окна
             .setAutoCancel(true)
             .addAction(0, "✅ Сделано", doneIntent)
             .addAction(0, "⏰ Отложить 1ч", snoozeIntent)
