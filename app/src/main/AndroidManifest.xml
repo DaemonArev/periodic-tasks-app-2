@@ -5,6 +5,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:allowBackup="true"
@@ -23,6 +24,11 @@
             </intent-filter>
         </activity>
 
-    </application>
+        <receiver android:name=".AlarmReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="FIRE_ALARM" />
+            </intent-filter>
+        </receiver>
 
+    </application>
 </manifest>
