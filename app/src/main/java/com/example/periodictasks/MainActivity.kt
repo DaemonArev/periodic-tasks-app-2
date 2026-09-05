@@ -8,755 +8,301 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.*
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material.icons.outlined.*
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
-import androidx.core.content.ContextCompat
-import org.json.JSONArray
-import org.json.JSONObject
-import java.text.SimpleDateFormat
-import java.util.*
+import androidx.core.app.NotificationManagerCompat
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import java.time.Instant
+import java.time.LocalDateTime
+import java.time.ZoneId
+import java.util.UUID
 
-enum class Recurrence(val title: String, val shortName: String) {
-    DAILY("Каждый день", "Ежедневно"),
-    WEEKLY("Каждую неделю", "Еженедельно"),
-    MONTHLY("Каждый месяц", "Ежемесячно")
+// --- МОДЕЛИ ДАННЫХ ---
+enum class RecurrenceType(val title: String) {
+    DAILY("Ежедневно"),
+    WEEKLY("Еженедельно"),
+    MONTHLY("Число месяца"),
+    YEARLY("Ежегодно"),
+    EVENT("Важное событие")
 }
 
 data class PeriodicTask(
     val id: String = UUID.randomUUID().toString(),
     val title: String,
-    val description: String = "",
-    val recurrence: Recurrence,
-    val nextTriggerTimeMillis: Long,
-    val isCompletedForCurrentCycle: Boolean = false
-) {
-    fun toJson(): JSONObject = JSONObject().apply {
-        put("id", id)
-        put("title", title)
-        put("description", description)
-        put("recurrence", recurrence.name)
-        put("nextTriggerTimeMillis", nextTriggerTimeMillis)
-        put("isCompletedForCurrentCycle", isCompletedForCurrentCycle)
-    }
-
-    companion object {
-        fun fromJson(json: JSONObject): PeriodicTask {
-            return PeriodicTask(
-                id = json.getString("id"),
-                title = json.getString("title"),
-                description = json.optString("description", ""),
-                recurrence = Recurrence.valueOf(json.getString("recurrence")),
-                nextTriggerTimeMillis = json.getLong("nextTriggerTimeMillis"),
-                isCompletedForCurrentCycle = json.optBoolean("isCompletedForCurrentCycle", false)
-            )
-        }
-    }
-}
-
-class TaskRepository(context: Context) {
-    private val prefs: SharedPreferences =
-        context.getSharedPreferences("periodic_tasks_prefs", Context.MODE_PRIVATE)
-
-    fun getTasks(): List<PeriodicTask> {
-        val raw = prefs.getString("tasks_json", "[]") ?: "[]"
-        val array = JSONArray(raw)
-        val list = mutableListOf<PeriodicTask>()
-        for (i in 0 until array.length()) {
-            list.add(PeriodicTask.fromJson(array.getJSONObject(i)))
-        }
-        return list.sortedBy { it.nextTriggerTimeMillis }
-    }
-
-    fun saveTasks(tasks: List<PeriodicTask>) {
-        val array = JSONArray()
-        tasks.forEach { array.put(it.toJson()) }
-        prefs.edit().putString("tasks_json", array.toString()).apply()
-    }
-
-    fun saveTask(task: PeriodicTask) {
-        val current = getTasks().toMutableList()
-        val index = current.indexOfFirst { it.id == task.id }
-        if (index != -1) {
-            current[index] = task
-        } else {
-            current.add(task)
-        }
-        saveTasks(current)
-    }
-
-    fun deleteTask(taskId: String) {
-        val current = getTasks().filter { it.id != taskId }
-        saveTasks(current)
-    }
-
-    fun getTaskById(taskId: String): PeriodicTask? {
-        return getTasks().find { it.id == taskId }
-    }
-}
-
-object NotificationConstants {
-    const val CHANNEL_ID = "periodic_task_reminders"
-    const val CHANNEL_NAME = "Периодические напоминания"
-    const val CHANNEL_DESC = "Уведомления о регулярных задачах (счётчики, оплаты, отчёты)"
-
-    const val ACTION_SNOOZE_1_HOUR = "com.example.periodictasks.ACTION_SNOOZE_1_HOUR"
-    const val ACTION_SNOOZE_1_DAY = "com.example.periodictasks.ACTION_SNOOZE_1_DAY"
-    const val ACTION_MARK_DONE = "com.example.periodictasks.ACTION_MARK_DONE"
-    const val ACTION_TRIGGER = "com.example.periodictasks.ACTION_TRIGGER_TASK"
-
-    const val EXTRA_TASK_ID = "extra_task_id"
-}
-
-class TaskAlarmScheduler(private val context: Context) {
-    private val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-
-    fun scheduleTask(task: PeriodicTask) {
-        val intent = Intent(context, TaskNotificationReceiver::class.java).apply {
-            action = NotificationConstants.ACTION_TRIGGER
-            putExtra(NotificationConstants.EXTRA_TASK_ID, task.id)
-        }
-
-        val pendingIntent = PendingIntent.getBroadcast(
-            context,
-            task.id.hashCode(),
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (alarmManager.canScheduleExactAlarms()) {
-                alarmManager.setExactAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    task.nextTriggerTimeMillis,
-                    pendingIntent
-                )
-            } else {
-                alarmManager.setAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    task.nextTriggerTimeMillis,
-                    pendingIntent
-                )
-            }
-        } else {
-            alarmManager.setExactAndAllowWhileIdle(
-                AlarmManager.RTC_WAKEUP,
-                task.nextTriggerTimeMillis,
-                pendingIntent
-            )
-        }
-    }
-
-    fun cancelTask(task: PeriodicTask) {
-        val intent = Intent(context, TaskNotificationReceiver::class.java).apply {
-            action = NotificationConstants.ACTION_TRIGGER
-            putExtra(NotificationConstants.EXTRA_TASK_ID, task.id)
-        }
-        val pendingIntent = PendingIntent.getBroadcast(
-            context,
-            task.id.hashCode(),
-            intent,
-            PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
-        )
-        if (pendingIntent != null) {
-            alarmManager.cancel(pendingIntent)
-        }
-    }
-}
-
-class TaskNotificationReceiver : BroadcastReceiver() {
-    override fun onReceive(context: Context, intent: Intent) {
-        val repo = TaskRepository(context)
-        val scheduler = TaskAlarmScheduler(context)
-        val taskId = intent.getStringExtra(NotificationConstants.EXTRA_TASK_ID) ?: return
-        val task = repo.getTaskById(taskId) ?: return
-        val notificationManager =
-            context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-
-        when (intent.action) {
-            NotificationConstants.ACTION_TRIGGER -> {
-                showNotification(context, notificationManager, task)
-            }
-            NotificationConstants.ACTION_SNOOZE_1_HOUR -> {
-                notificationManager.cancel(task.id.hashCode())
-                val newTime = System.currentTimeMillis() + (60 * 60 * 1000L)
-                val updated = task.copy(nextTriggerTimeMillis = newTime)
-                repo.saveTask(updated)
-                scheduler.scheduleTask(updated)
-            }
-            NotificationConstants.ACTION_SNOOZE_1_DAY -> {
-                notificationManager.cancel(task.id.hashCode())
-                val newTime = System.currentTimeMillis() + (24 * 60 * 60 * 1000L)
-                val updated = task.copy(nextTriggerTimeMillis = newTime)
-                repo.saveTask(updated)
-                scheduler.scheduleTask(updated)
-            }
-            NotificationConstants.ACTION_MARK_DONE -> {
-                notificationManager.cancel(task.id.hashCode())
-                val nextCalendar = Calendar.getInstance().apply {
-                    timeInMillis = task.nextTriggerTimeMillis
-                }
-                when (task.recurrence) {
-                    Recurrence.DAILY -> nextCalendar.add(Calendar.DAY_OF_YEAR, 1)
-                    Recurrence.WEEKLY -> nextCalendar.add(Calendar.WEEK_OF_YEAR, 1)
-                    Recurrence.MONTHLY -> nextCalendar.add(Calendar.MONTH, 1)
-                }
-                val updated = task.copy(
-                    nextTriggerTimeMillis = nextCalendar.timeInMillis,
-                    isCompletedForCurrentCycle = false
-                )
-                repo.saveTask(updated)
-                scheduler.scheduleTask(updated)
-            }
-        }
-    }
-
-    private fun showNotification(
-        context: Context,
-        notificationManager: NotificationManager,
-        task: PeriodicTask
-    ) {
-        val openIntent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val openPending = PendingIntent.getActivity(
-            context,
-            task.id.hashCode(),
-            openIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val snooze1hIntent = Intent(context, TaskNotificationReceiver::class.java).apply {
-            action = NotificationConstants.ACTION_SNOOZE_1_HOUR
-            putExtra(NotificationConstants.EXTRA_TASK_ID, task.id)
-        }
-        val snooze1hPending = PendingIntent.getBroadcast(
-            context,
-            (task.id + "_1h").hashCode(),
-            snooze1hIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val snooze1dIntent = Intent(context, TaskNotificationReceiver::class.java).apply {
-            action = NotificationConstants.ACTION_SNOOZE_1_DAY
-            putExtra(NotificationConstants.EXTRA_TASK_ID, task.id)
-        }
-        val snooze1dPending = PendingIntent.getBroadcast(
-            context,
-            (task.id + "_1d").hashCode(),
-            snooze1dIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val doneIntent = Intent(context, TaskNotificationReceiver::class.java).apply {
-            action = NotificationConstants.ACTION_MARK_DONE
-            putExtra(NotificationConstants.EXTRA_TASK_ID, task.id)
-        }
-        val donePending = PendingIntent.getBroadcast(
-            context,
-            (task.id + "_done").hashCode(),
-            doneIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val builder = NotificationCompat.Builder(context, NotificationConstants.CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-            .setContentTitle(task.title)
-            .setContentText(
-                if (task.description.isNotBlank()) task.description
-                else "Напоминание: ${task.recurrence.title.lowercase()}"
-            )
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setCategory(NotificationCompat.CATEGORY_REMINDER)
-            .setContentIntent(openPending)
-            .setAutoCancel(true)
-            .addAction(0, "⏰ Отложить 1 ч", snooze1hPending)
-            .addAction(0, "📅 Отложить 1 д", snooze1dPending)
-            .addAction(0, "✅ Сделано", donePending)
-
-        notificationManager.notify(task.id.hashCode(), builder.build())
-    }
-}
-
-private val ExpressivePrimary = Color(0xFF6750A4)
-private val ExpressiveOnPrimary = Color(0xFFFFFFFF)
-private val ExpressivePrimaryContainer = Color(0xFFEADDFF)
-private val ExpressiveOnPrimaryContainer = Color(0xFF21005D)
-private val ExpressiveSecondary = Color(0xFF625B71)
-private val ExpressiveSecondaryContainer = Color(0xFFE8DEF8)
-private val ExpressiveTertiary = Color(0xFF7D5260)
-private val ExpressiveTertiaryContainer = Color(0xFFFFD8E4)
-private val ExpressiveBackground = Color(0xFFFDF7FF)
-private val ExpressiveSurface = Color(0xFFF7F2FA)
-private val ExpressiveSurfaceVariant = Color(0xFFE7E0EC)
-private val ExpressiveOutline = Color(0xFF79747E)
-
-val ExpressiveShapes = Shapes(
-    extraSmall = RoundedCornerShape(8.dp),
-    small = RoundedCornerShape(14.dp),
-    medium = RoundedCornerShape(22.dp),
-    large = RoundedCornerShape(32.dp),
-    extraLarge = RoundedCornerShape(40.dp)
+    val description: String,
+    val type: RecurrenceType,
+    val dayOfWeek: Int = 1, // 1=Пн, 7=Вс
+    val dayOfMonth: Int = 1, // 1-31
+    val monthOfYear: Int = 1, // 1-12
+    val hour: Int = 9,
+    val minute: Int = 0,
+    val notifyMonthBefore: Boolean = false,
+    val notifyTwoWeeksBefore: Boolean = false,
+    val notifyWeekBefore: Boolean = false
 )
 
-@Composable
-fun Material3ExpressiveTheme(content: @Composable () -> Unit) {
-    val colorScheme = lightColorScheme(
-        primary = ExpressivePrimary,
-        onPrimary = ExpressiveOnPrimary,
-        primaryContainer = ExpressivePrimaryContainer,
-        onPrimaryContainer = ExpressiveOnPrimaryContainer,
-        secondary = ExpressiveSecondary,
-        secondaryContainer = ExpressiveSecondaryContainer,
-        tertiary = ExpressiveTertiary,
-        tertiaryContainer = ExpressiveTertiaryContainer,
-        background = ExpressiveBackground,
-        surface = ExpressiveSurface,
-        surfaceVariant = ExpressiveSurfaceVariant,
-        outline = ExpressiveOutline
-    )
+// --- ХРАНИЛИЩЕ (ViewModel) ---
+class TaskViewModel : ViewModel() {
+    private val _tasks = MutableStateFlow<List<PeriodicTask>>(emptyList())
+    val tasks: StateFlow<List<PeriodicTask>> = _tasks.asStateFlow()
 
-    MaterialTheme(
-        colorScheme = colorScheme,
-        shapes = ExpressiveShapes,
-        content = content
-    )
+    fun addTask(task: PeriodicTask, context: Context) {
+        _tasks.value = _tasks.value + task
+        scheduleAlarms(context, task)
+    }
+
+    fun completeTask(taskId: String, context: Context) {
+        val task = _tasks.value.find { it.id == taskId } ?: return
+        // Перепланируем на следующий период
+        scheduleAlarms(context, task)
+    }
 }
 
-class MainActivity : ComponentActivity() {
+// --- ЛОГИКА БУДИЛЬНИКОВ ---
+fun scheduleAlarms(context: Context, task: Task) {
+    val am = context.getSystemService(AlarmManager::class.java)
+    val intent = Intent(context, AlarmReceiver::class.java).apply {
+        putExtra("TASK_ID", task.id)
+        putExtra("TASK_TITLE", task.title)
+        putExtra("TASK_DESC", task.description)
+    }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        createNotificationChannel()
+    val now = LocalDateTime.now()
+    var target = now.withHour(task.hour).withMinute(task.minute).withSecond(0).withNano(0)
 
-        setContent {
-            Material3ExpressiveTheme {
-                MainAppScreen()
+    when (task.type) {
+        RecurrenceType.DAILY -> {
+            if (target.isBefore(now)) target = target.plusDays(1)
+        }
+        RecurrenceType.WEEKLY -> {
+            while (target.dayOfWeek.value != task.dayOfWeek || target.isBefore(now)) {
+                target = target.plusDays(1)
+            }
+        }
+        RecurrenceType.MONTHLY -> {
+            val maxDays = target.month.length(target.toLocalDate().isLeapYear)
+            target = target.withDayOfMonth(task.dayOfMonth.coerceAtMost(maxDays))
+            if (target.isBefore(now)) {
+                target = target.plusMonths(1)
+                target = target.withDayOfMonth(task.dayOfMonth.coerceAtMost(target.month.length(target.toLocalDate().isLeapYear)))
+            }
+        }
+        RecurrenceType.YEARLY, RecurrenceType.EVENT -> {
+            val maxDays = java.time.Month.of(task.monthOfYear).length(target.toLocalDate().isLeapYear)
+            target = target.withMonth(task.monthOfYear).withDayOfMonth(task.dayOfMonth.coerceAtMost(maxDays))
+            if (target.isBefore(now)) {
+                target = target.plusYears(1)
+                val newMax = java.time.Month.of(task.monthOfYear).length(target.toLocalDate().isLeapYear)
+                target = target.withDayOfMonth(task.dayOfMonth.coerceAtMost(newMax))
             }
         }
     }
 
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                NotificationConstants.CHANNEL_ID,
-                NotificationConstants.CHANNEL_NAME,
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = NotificationConstants.CHANNEL_DESC
-                enableVibration(true)
+    // 1. Основной будильник (В саму дату)
+    val piMain = PendingIntent.getBroadcast(
+        context, task.id.hashCode(),
+        intent.apply { putExtra("IS_PRE", false) },
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+    am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, target.atZone(ZoneId.systemDefault()).toEpochSecond() * 1000, piMain)
+
+    // 2. Заблаговременные будильники (Только для Событий)
+    if (task.type == RecurrenceType.EVENT) {
+        val preNotifs = listOf(
+            Triple(task.notifyMonthBefore, target.minusMonths(1), "Скоро событие (через месяц): "),
+            Triple(task.notifyTwoWeeksBefore, target.minusWeeks(2), "Скоро событие (через 2 недели): "),
+            Triple(task.notifyWeekBefore, target.minusWeeks(1), "Скоро событие (через неделю): ")
+        )
+        
+        preNotifs.forEachIndexed { index, (isEnabled, preTarget, prefix) ->
+            val piPre = PendingIntent.getBroadcast(
+                context, task.id.hashCode() + index + 1,
+                intent.apply { 
+                    putExtra("IS_PRE", true)
+                    putExtra("PRE_PREFIX", prefix)
+                },
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            
+            if (isEnabled && preTarget.isAfter(now)) {
+                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, preTarget.atZone(ZoneId.systemDefault()).toEpochSecond() * 1000, piPre)
+            } else {
+                am.cancel(piPre)
             }
-            val notificationManager =
-                getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            notificationManager.createNotificationChannel(channel)
+        }
+    }
+}
+
+class AlarmReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val taskId = intent.getStringExtra("TASK_ID") ?: return
+        val title = intent.getStringExtra("TASK_TITLE") ?: "Напоминание"
+        val desc = intent.getStringExtra("TASK_DESC") ?: ""
+        val isPre = intent.getBooleanExtra("IS_PRE", false)
+        val prePrefix = intent.getStringExtra("PRE_PREFIX") ?: ""
+        val action = intent.action
+
+        val nm = NotificationManagerCompat.from(context)
+
+        // Обработка кнопок из уведомления
+        if (action != null) {
+            when (action) {
+                "DONE" -> {
+                    nm.cancel(taskId.hashCode())
+                    if (!isPre) {
+                        // Если это основное событие, имитируем запуск перепланирования
+                        val fakeTask = PeriodicTask(id = taskId, title = "", description = "", type = RecurrenceType.DAILY)
+                        // В реальном приложении здесь нужен запрос к БД по taskId
+                    }
+                    return
+                }
+                "SNOOZE_1H" -> {
+                    val am = context.getSystemService(AlarmManager::class.java)
+                    val pi = PendingIntent.getBroadcast(context, taskId.hashCode() + 99, intent.apply { action = null }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                    am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 3600_000L, pi)
+                    nm.cancel(taskId.hashCode())
+                    return
+                }
+            }
+        }
+
+        // Создание уведомления
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel("tasks", "Задачи", NotificationManager.IMPORTANCE_HIGH)
+            nm.createNotificationChannel(channel)
+        }
+
+        val doneIntent = PendingIntent.getBroadcast(context, taskId.hashCode(), Intent(context, AlarmReceiver::class.java).apply { 
+            this.action = "DONE"
+            putExtra("TASK_ID", taskId)
+            putExtra("IS_PRE", isPre)
+        }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+
+        val snoozeIntent = PendingIntent.getBroadcast(context, taskId.hashCode() + 100, Intent(context, AlarmReceiver::class.java).apply { 
+            this.action = "SNOOZE_1H"
+            putExtra("TASK_ID", taskId)
+        }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+
+        val displayTitle = if (isPre) "$prePrefix$title" else title
+
+        val builder = NotificationCompat.Builder(context, "tasks")
+            .setSmallIcon(android.R.drawable.ic_popup_reminder)
+            .setContentTitle(displayTitle)
+            .setContentText(desc)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .addAction(0, "✅ Сделано", doneIntent)
+            .addAction(0, "⏰ Отложить 1ч", snoozeIntent)
+
+        if (ActivityCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+            nm.notify(taskId.hashCode(), builder.build())
+        }
+    }
+}
+
+// --- UI СЛОЙ ---
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val requestPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        setContent {
+            MaterialTheme(colorScheme = dynamicLightColorScheme(LocalContext.current)) {
+                PeriodicTasksApp()
+            }
         }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainAppScreen() {
+fun PeriodicTasksApp(viewModel: TaskViewModel = viewModel()) {
+    var showAddSheet by remember { mutableStateOf(false) }
+    val tasks by viewModel.tasks.collectAsState()
     val context = LocalContext.current
-    val repository = remember { TaskRepository(context) }
-    val scheduler = remember { TaskAlarmScheduler(context) }
-
-    var tasks by remember { mutableStateOf(repository.getTasks()) }
-    var showAddDialog by remember { mutableStateOf(false) }
-    var filterRecurrence by remember { mutableStateOf<Recurrence?>(null) }
-    var taskToSnoozeModal by remember { mutableStateOf<PeriodicTask?>(null) }
-
-    val permissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { _ -> }
-
-    LaunchedEffect(Unit) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.POST_NOTIFICATIONS
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        }
-    }
-
-    fun refreshTasks() {
-        tasks = repository.getTasks()
-    }
-
-    val filteredTasks = remember(tasks, filterRecurrence) {
-        if (filterRecurrence == null) tasks
-        else tasks.filter { it.recurrence == filterRecurrence }
-    }
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
-            LargeTopAppBar(
-                colors = TopAppBarDefaults.largeTopAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                    titleContentColor = MaterialTheme.colorScheme.onBackground
-                ),
-                title = {
-                    Column {
-                        Text(
-                            text = "Регулярные дела",
-                            style = MaterialTheme.typography.headlineMedium.copy(
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = (-0.5).sp
-                            )
-                        )
-                        Text(
-                            text = "Напоминания с повтором и отсрочкой",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.outline
-                        )
-                    }
-                },
-                actions = {
-                    IconButton(
-                        onClick = {
-                            if (tasks.isNotEmpty()) {
-                                val dummyIntent = Intent(context, TaskNotificationReceiver::class.java).apply {
-                                    action = NotificationConstants.ACTION_TRIGGER
-                                    putExtra(NotificationConstants.EXTRA_TASK_ID, tasks.first().id)
-                                }
-                                context.sendBroadcast(dummyIntent)
-                            }
-                        }
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.NotificationsActive,
-                            contentDescription = "Тест уведомления",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                }
+            CenterAlignedTopAppBar(
+                title = { Text("Мои Задачи", fontWeight = FontWeight.Bold) },
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                )
             )
         },
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { showAddDialog = true },
-                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                shape = RoundedCornerShape(26.dp),
-                elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 6.dp)
+            LargeFloatingActionButton(
+                onClick = { showAddSheet = true },
+                containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                shape = RoundedCornerShape(28.dp)
             ) {
-                Icon(Icons.Filled.Add, contentDescription = "Добавить")
-                Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    "Новое дело",
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 15.sp
-                )
+                Icon(Icons.Filled.Add, "Добавить", modifier = Modifier.size(36.dp))
             }
         }
-    ) { paddingValues ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
+    ) { padding ->
+        LazyColumn(
+            contentPadding = padding,
+            modifier = Modifier.fillMaxSize().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            FilterChipsRow(
-                selected = filterRecurrence,
-                onSelect = { filterRecurrence = it }
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            if (filteredTasks.isEmpty()) {
-                EmptyStateView(hasFilters = filterRecurrence != null) {
-                    showAddDialog = true
-                }
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    items(filteredTasks, key = { it.id }) { task ->
-                        ExpressiveTaskCard(
-                            task = task,
-                            onCompleteCycle = {
-                                val nextCal = Calendar.getInstance().apply {
-                                    timeInMillis = task.nextTriggerTimeMillis
-                                }
-                                when (task.recurrence) {
-                                    Recurrence.DAILY -> nextCal.add(Calendar.DAY_OF_YEAR, 1)
-                                    Recurrence.WEEKLY -> nextCal.add(Calendar.WEEK_OF_YEAR, 1)
-                                    Recurrence.MONTHLY -> nextCal.add(Calendar.MONTH, 1)
-                                }
-                                val updated = task.copy(nextTriggerTimeMillis = nextCal.timeInMillis)
-                                repository.saveTask(updated)
-                                scheduler.scheduleTask(updated)
-                                refreshTasks()
-                            },
-                            onSnoozeClick = {
-                                taskToSnoozeModal = task
-                            },
-                            onDelete = {
-                                scheduler.cancelTask(task)
-                                repository.deleteTask(task.id)
-                                refreshTasks()
-                            }
-                        )
-                    }
-                }
+            items(tasks) { task ->
+                TaskCard(task)
             }
         }
-    }
 
-    if (showAddDialog) {
-        AddTaskBottomSheet(
-            onDismiss = { showAddDialog = false },
-            onSave = { newTask ->
-                repository.saveTask(newTask)
-                scheduler.scheduleTask(newTask)
-                refreshTasks()
-                showAddDialog = false
-            }
-        )
-    }
-
-    if (taskToSnoozeModal != null) {
-        val task = taskToSnoozeModal!!
-        SnoozeChoiceSheet(
-            taskTitle = task.title,
-            onDismiss = { taskToSnoozeModal = null },
-            onSnooze1Hour = {
-                val newTime = System.currentTimeMillis() + (60 * 60 * 1000L)
-                val updated = task.copy(nextTriggerTimeMillis = newTime)
-                repository.saveTask(updated)
-                scheduler.scheduleTask(updated)
-                refreshTasks()
-                taskToSnoozeModal = null
-            },
-            onSnooze1Day = {
-                val newTime = System.currentTimeMillis() + (24 * 60 * 60 * 1000L)
-                val updated = task.copy(nextTriggerTimeMillis = newTime)
-                repository.saveTask(updated)
-                scheduler.scheduleTask(updated)
-                refreshTasks()
-                taskToSnoozeModal = null
-            }
-        )
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun FilterChipsRow(
-    selected: Recurrence?,
-    onSelect: (Recurrence?) -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 18.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        FilterChip(
-            selected = selected == null,
-            onClick = { onSelect(null) },
-            label = { Text("Все") },
-            shape = RoundedCornerShape(16.dp),
-            colors = FilterChipDefaults.filterChipColors(
-                selectedContainerColor = MaterialTheme.colorScheme.primary,
-                selectedLabelColor = MaterialTheme.colorScheme.onPrimary
-            )
-        )
-        Recurrence.values().forEach { rec ->
-            FilterChip(
-                selected = selected == rec,
-                onClick = { onSelect(if (selected == rec) null else rec) },
-                label = { Text(rec.shortName) },
-                shape = RoundedCornerShape(16.dp),
-                colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = MaterialTheme.colorScheme.primary,
-                    selectedLabelColor = MaterialTheme.colorScheme.onPrimary
-                )
-            )
-        }
-    }
-}
-
-@Composable
-fun ExpressiveTaskCard(
-    task: PeriodicTask,
-    onCompleteCycle: () -> Unit,
-    onSnoozeClick: () -> Unit,
-    onDelete: () -> Unit
-) {
-    val dateFormat = remember { SimpleDateFormat("dd MMMM, HH:mm", Locale("ru")) }
-    val formattedDate = remember(task.nextTriggerTimeMillis) {
-        dateFormat.format(Date(task.nextTriggerTimeMillis))
-    }
-
-    val isOverdue = remember(task.nextTriggerTimeMillis) {
-        task.nextTriggerTimeMillis <= System.currentTimeMillis()
-    }
-
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(24.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 3.dp,
-        border = if (isOverdue) {
-            androidx.compose.foundation.BorderStroke(1.5.dp, MaterialTheme.colorScheme.error)
-        } else null
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(20.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+        if (showAddSheet) {
+            ModalBottomSheet(
+                onDismissRequest = { showAddSheet = false },
+                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+                shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp)
             ) {
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = when (task.recurrence) {
-                        Recurrence.DAILY -> MaterialTheme.colorScheme.primaryContainer
-                        Recurrence.WEEKLY -> MaterialTheme.colorScheme.secondaryContainer
-                        Recurrence.MONTHLY -> MaterialTheme.colorScheme.tertiaryContainer
-                    }
-                ) {
-                    Text(
-                        text = task.recurrence.title,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = when (task.recurrence) {
-                                Recurrence.DAILY -> MaterialTheme.colorScheme.onPrimaryContainer
-                                Recurrence.WEEKLY -> MaterialTheme.colorScheme.onSecondaryContainer
-                                Recurrence.MONTHLY -> MaterialTheme.colorScheme.onTertiaryContainer
-                            }
-                        )
-                    )
-                }
-
-                IconButton(
-                    onClick = onDelete,
-                    modifier = Modifier.size(32.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.DeleteOutline,
-                        contentDescription = "Удалить",
-                        tint = MaterialTheme.colorScheme.outline
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Text(
-                text = task.title,
-                style = MaterialTheme.typography.titleLarge.copy(
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 19.sp
-                ),
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-
-            if (task.description.isNotBlank()) {
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = task.description,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.outline,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
+                AddWizard(
+                    onSave = { newTask ->
+                        viewModel.addTask(newTask, context)
+                        showAddSheet = false
+                    },
+                    onCancel = { showAddSheet = false }
                 )
-            }
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Outlined.Schedule,
-                    contentDescription = null,
-                    tint = if (isOverdue) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(18.dp)
-                )
-                Text(
-                    text = if (isOverdue) "Срок наступил! ($formattedDate)" else "Срок: $formattedDate",
-                    style = MaterialTheme.typography.bodySmall.copy(
-                        fontWeight = if (isOverdue) FontWeight.Bold else FontWeight.Medium,
-                        color = if (isOverdue) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
-                    )
-                )
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                OutlinedButton(
-                    onClick = onSnoozeClick,
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(vertical = 10.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Snooze,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Отложить", fontSize = 13.sp)
-                }
-
-                Button(
-                    onClick = onCompleteCycle,
-                    shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary
-                    ),
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(vertical = 10.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Check,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Выполнено", fontSize = 13.sp)
-                }
             }
         }
     }
@@ -764,324 +310,178 @@ fun ExpressiveTaskCard(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AddTaskBottomSheet(
-    onDismiss: () -> Unit,
-    onSave: (PeriodicTask) -> Unit
-) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+fun AddWizard(onSave: (PeriodicTask) -> Unit, onCancel: () -> Unit) {
+    var step by remember { mutableIntStateOf(0) }
+    
+    // Состояния полей
     var title by remember { mutableStateOf("") }
-    var description by remember { mutableStateOf("") }
-    var selectedRecurrence by remember { mutableStateOf(Recurrence.MONTHLY) }
+    var desc by remember { mutableStateOf("") }
+    var type by remember { mutableStateOf(RecurrenceType.DAILY) }
+    var dayOfMonth by remember { mutableStateOf(1) }
+    var selectedDateMillis by remember { mutableStateOf<Long?>(null) }
+    
+    val timePickerState = rememberTimePickerState(initialHour = 9, initialMinute = 0, is24Hour = true)
+    
+    var notifyMonth by remember { mutableStateOf(false) }
+    var notifyTwoWeeks by remember { mutableStateOf(false) }
+    var notifyWeek by remember { mutableStateOf(false) }
 
-    val calendar = remember { Calendar.getInstance().apply { add(Calendar.MINUTE, 5) } }
-    var selectedDateMillis by remember { mutableStateOf(calendar.timeInMillis) }
-    val displayFormat = remember { SimpleDateFormat("dd.MM.yyyy, HH:mm", Locale.getDefault()) }
-
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp),
-        containerColor = MaterialTheme.colorScheme.surface
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp, vertical = 12.dp)
-                .navigationBarsPadding()
-        ) {
-            Text(
-                text = "Новое регулярное задание",
-                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold)
-            )
-
-            Spacer(modifier = Modifier.height(18.dp))
-
-            OutlinedTextField(
-                value = title,
-                onValueChange = { title = it },
-                label = { Text("Название (например: Передать счётчики)") },
-                placeholder = { Text("Показания воды и электричества") },
-                singleLine = true,
-                shape = RoundedCornerShape(18.dp),
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            OutlinedTextField(
-                value = description,
-                onValueChange = { description = it },
-                label = { Text("Примечание (необязательно)") },
-                placeholder = { Text("Лицевой счет: 1234567, сайт mos.ru") },
-                maxLines = 3,
-                shape = RoundedCornerShape(18.dp),
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Text(
-                text = "Периодичность повторения",
-                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold)
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Recurrence.values().forEach { rec ->
-                    val isSelected = selectedRecurrence == rec
-                    Surface(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable { selectedRecurrence = rec },
-                        shape = RoundedCornerShape(16.dp),
-                        color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-                        border = if (isSelected) androidx.compose.foundation.BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(vertical = 12.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text(
-                                text = rec.shortName,
-                                style = MaterialTheme.typography.bodySmall.copy(
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            )
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Surface(
-                shape = RoundedCornerShape(18.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column {
-                        Text(
-                            text = "Первое срабатывание",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.outline
-                        )
-                        Text(
-                            text = displayFormat.format(Date(selectedDateMillis)),
-                            style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Bold)
-                        )
-                    }
-                    TextButton(
-                        onClick = {
-                            val cal = Calendar.getInstance().apply {
-                                add(Calendar.DAY_OF_YEAR, 1)
-                                set(Calendar.HOUR_OF_DAY, 9)
-                                set(Calendar.MINUTE, 0)
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp).navigationBarsPadding()) {
+        AnimatedContent(
+            targetState = step,
+            transitionSpec = { slideInHorizontally(tween(300)) { it } togetherWith slideOutHorizontally(tween(300)) { -it } }
+        ) { currentStep ->
+            when (currentStep) {
+                0 -> {
+                    // ШАГ 1: Основное
+                    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                        Text("Создать напоминание", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                        OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("Название") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp))
+                        OutlinedTextField(value = desc, onValueChange = { desc = it }, label = { Text("Описание (опционально)") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp))
+                        
+                        Text("Повторять:", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            RecurrenceType.values().forEach { recType ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                                        .background(if (type == recType) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)
+                                        .clickable { type = recType }.padding(16.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(recType.title, fontWeight = if (type == recType) FontWeight.Bold else FontWeight.Normal)
+                                    Spacer(modifier = Modifier.weight(1f))
+                                    if (type == recType) Icon(Icons.Default.Check, null)
+                                }
                             }
-                            selectedDateMillis = cal.timeInMillis
                         }
-                    ) {
-                        Text("Завтра в 9:00")
+                    }
+                }
+                1 -> {
+                    // ШАГ 2: Дата
+                    Column(verticalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxWidth()) {
+                        Text("Выберите дату", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                        when (type) {
+                            RecurrenceType.MONTHLY -> {
+                                Text("Каждое число месяца:")
+                                LazyVerticalGrid(columns = GridCells.Fixed(7), modifier = Modifier.height(250.dp)) {
+                                    items((1..31).toList()) { day ->
+                                        Box(
+                                            modifier = Modifier.padding(4.dp).aspectRatio(1f).clip(CircleShape)
+                                                .background(if (dayOfMonth == day) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                                .clickable { dayOfMonth = day },
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(day.toString(), color = if (dayOfMonth == day) Color.White else MaterialTheme.colorScheme.onSurface)
+                                        }
+                                    }
+                                }
+                            }
+                            RecurrenceType.YEARLY, RecurrenceType.EVENT -> {
+                                val dateState = rememberDatePickerState()
+                                selectedDateMillis = dateState.selectedDateMillis
+                                DatePicker(state = dateState, title = null, headline = null, showModeToggle = false)
+                            }
+                            else -> Text("Для этого типа дата не требуется", modifier = Modifier.padding(32.dp))
+                        }
+                    }
+                }
+                2 -> {
+                    // ШАГ 3: Время
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                        Text("Выберите время", fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.Start).padding(bottom = 24.dp))
+                        TimePicker(state = timePickerState)
+                    }
+                }
+                3 -> {
+                    // ШАГ 4: Заблаговременные уведомления (Только Событие)
+                    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                        Text("Заранее напомнить?", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = notifyMonth, onCheckedChange = { notifyMonth = it })
+                            Text("За 1 месяц")
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = notifyTwoWeeks, onCheckedChange = { notifyTwoWeeks = it })
+                            Text("За 2 недели")
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = notifyWeek, onCheckedChange = { notifyWeek = it })
+                            Text("За 1 неделю")
+                        }
                     }
                 }
             }
+        }
 
-            Spacer(modifier = Modifier.height(24.dp))
-
+        Spacer(modifier = Modifier.height(32.dp))
+        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+            TextButton(onClick = { if (step > 0) step-- else onCancel() }) {
+                Text(if (step == 0) "Отмена" else "Назад", fontSize = 16.sp)
+            }
+            
+            val isLastStep = (type != RecurrenceType.EVENT && step == 2) || (type == RecurrenceType.EVENT && step == 3)
+            
             Button(
                 onClick = {
-                    if (title.isNotBlank()) {
-                        val task = PeriodicTask(
-                            title = title.trim(),
-                            description = description.trim(),
-                            recurrence = selectedRecurrence,
-                            nextTriggerTimeMillis = selectedDateMillis
+                    if (type == RecurrenceType.DAILY && step == 0) step = 2 // Пропускаем выбор даты для Ежедневного
+                    else if (!isLastStep) step++
+                    else {
+                        // ФИНАЛ: Сохранение
+                        var finalMonth = 1
+                        var finalDay = 1
+                        if (selectedDateMillis != null) {
+                            val dt = Instant.ofEpochMilli(selectedDateMillis!!).atZone(ZoneId.of("UTC")).toLocalDate()
+                            finalMonth = dt.monthValue
+                            finalDay = dt.dayOfMonth
+                        }
+                        
+                        onSave(
+                            PeriodicTask(
+                                title = title.ifEmpty { "Без названия" },
+                                description = desc,
+                                type = type,
+                                dayOfMonth = if (type == RecurrenceType.MONTHLY) dayOfMonth else finalDay,
+                                monthOfYear = finalMonth,
+                                hour = timePickerState.hour,
+                                minute = timePickerState.minute,
+                                notifyMonthBefore = notifyMonth,
+                                notifyTwoWeeksBefore = notifyTwoWeeks,
+                                notifyWeekBefore = notifyWeek
+                            )
                         )
-                        onSave(task)
                     }
                 },
-                enabled = title.isNotBlank(),
-                shape = RoundedCornerShape(20.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(54.dp)
+                shape = RoundedCornerShape(16.dp),
+                enabled = title.isNotBlank() || step > 0
             ) {
-                Text(
-                    text = "Сохранить и запустить",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold
-                )
+                Text(if (isLastStep) "Сохранить" else "Далее", fontSize = 16.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
             }
-            Spacer(modifier = Modifier.height(16.dp))
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun SnoozeChoiceSheet(
-    taskTitle: String,
-    onDismiss: () -> Unit,
-    onSnooze1Hour: () -> Unit,
-    onSnooze1Day: () -> Unit
-) {
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp),
-        containerColor = MaterialTheme.colorScheme.surface
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp, vertical = 12.dp)
-                .navigationBarsPadding()
-        ) {
-            Text(
-                text = "Отложить напоминание",
-                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "«$taskTitle»",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.outline
-            )
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onSnooze1Hour() },
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant
-            ) {
-                Row(
-                    modifier = Modifier.padding(18.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.HourglassTop,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(28.dp)
-                    )
-                    Spacer(modifier = Modifier.width(16.dp))
-                    Column {
-                        Text(
-                            text = "Отложить на 1 час",
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
-                        )
-                        Text(
-                            text = "Напомнить чуть позже сегодня",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.outline
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onSnooze1Day() },
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant
-            ) {
-                Row(
-                    modifier = Modifier.padding(18.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.CalendarToday,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.secondary,
-                        modifier = Modifier.size(28.dp)
-                    )
-                    Spacer(modifier = Modifier.width(16.dp))
-                    Column {
-                        Text(
-                            text = "Отложить на 1 день",
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
-                        )
-                        Text(
-                            text = "Перенести на то же время завтра",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.outline
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
         }
     }
 }
 
 @Composable
-fun EmptyStateView(
-    hasFilters: Boolean,
-    onAddClick: () -> Unit
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(32.dp),
-        contentAlignment = Alignment.Center
+fun TaskCard(task: PeriodicTask) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            Surface(
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.primaryContainer,
-                modifier = Modifier.size(96.dp)
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = Icons.Outlined.EventRepeat,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.size(48.dp)
+        Row(modifier = Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(task.title, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                if (task.description.isNotBlank()) {
+                    Text(task.description, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f), modifier = Modifier.padding(top = 4.dp))
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Notifications, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "${task.type.title} • ${String.format("%02d:%02d", task.hour, task.minute)}",
+                        fontSize = 14.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.primary
                     )
                 }
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            Text(
-                text = if (hasFilters) "Нет дел в этой категории" else "Пока нет регулярных задач",
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "Добавьте передачу показаний счётчиков, оплату интернета или полив цветов",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.outline,
-                modifier = Modifier.padding(horizontal = 24.dp),
-                lineHeight = 20.sp
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            Button(
-                onClick = onAddClick,
-                shape = RoundedCornerShape(20.dp)
-            ) {
-                Text("Создать первое задание")
             }
         }
     }
