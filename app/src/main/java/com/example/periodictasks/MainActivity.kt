@@ -38,7 +38,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
@@ -68,9 +67,9 @@ data class PeriodicTask(
     val title: String,
     val description: String,
     val type: RecurrenceType,
-    val dayOfWeek: Int = 1, // 1=Пн, 7=Вс
-    val dayOfMonth: Int = 1, // 1-31
-    val monthOfYear: Int = 1, // 1-12
+    val dayOfWeek: Int = 1,
+    val dayOfMonth: Int = 1,
+    val monthOfYear: Int = 1,
     val hour: Int = 9,
     val minute: Int = 0,
     val notifyMonthBefore: Boolean = false,
@@ -90,19 +89,13 @@ class TaskViewModel : ViewModel() {
 
     fun completeTask(taskId: String, context: Context) {
         val task = _tasks.value.find { it.id == taskId } ?: return
-        // Перепланируем на следующий период
         scheduleAlarms(context, task)
     }
 }
 
 // --- ЛОГИКА БУДИЛЬНИКОВ ---
-fun scheduleAlarms(context: Context, task: Task) {
-    val am = context.getSystemService(AlarmManager::class.java)
-    val intent = Intent(context, AlarmReceiver::class.java).apply {
-        putExtra("TASK_ID", task.id)
-        putExtra("TASK_TITLE", task.title)
-        putExtra("TASK_DESC", task.description)
-    }
+fun scheduleAlarms(context: Context, task: PeriodicTask) {
+    val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
 
     val now = LocalDateTime.now()
     var target = now.withHour(task.hour).withMinute(task.minute).withSecond(0).withNano(0)
@@ -135,10 +128,20 @@ fun scheduleAlarms(context: Context, task: Task) {
         }
     }
 
+    fun createBaseIntent(isPre: Boolean, prefix: String = ""): Intent {
+        return Intent(context, AlarmReceiver::class.java).apply {
+            putExtra("TASK_ID", task.id)
+            putExtra("TASK_TITLE", task.title)
+            putExtra("TASK_DESC", task.description)
+            putExtra("IS_PRE", isPre)
+            putExtra("PRE_PREFIX", prefix)
+        }
+    }
+
     // 1. Основной будильник (В саму дату)
     val piMain = PendingIntent.getBroadcast(
         context, task.id.hashCode(),
-        intent.apply { putExtra("IS_PRE", false) },
+        createBaseIntent(false),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
     am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, target.atZone(ZoneId.systemDefault()).toEpochSecond() * 1000, piMain)
@@ -154,10 +157,7 @@ fun scheduleAlarms(context: Context, task: Task) {
         preNotifs.forEachIndexed { index, (isEnabled, preTarget, prefix) ->
             val piPre = PendingIntent.getBroadcast(
                 context, task.id.hashCode() + index + 1,
-                intent.apply { 
-                    putExtra("IS_PRE", true)
-                    putExtra("PRE_PREFIX", prefix)
-                },
+                createBaseIntent(true, prefix),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             
@@ -177,25 +177,26 @@ class AlarmReceiver : BroadcastReceiver() {
         val desc = intent.getStringExtra("TASK_DESC") ?: ""
         val isPre = intent.getBooleanExtra("IS_PRE", false)
         val prePrefix = intent.getStringExtra("PRE_PREFIX") ?: ""
-        val action = intent.action
+        val intentActionStr = intent.action
 
         val nm = NotificationManagerCompat.from(context)
 
-        // Обработка кнопок из уведомления
-        if (action != null) {
-            when (action) {
+        if (intentActionStr != null) {
+            when (intentActionStr) {
                 "DONE" -> {
                     nm.cancel(taskId.hashCode())
-                    if (!isPre) {
-                        // Если это основное событие, имитируем запуск перепланирования
-                        val fakeTask = PeriodicTask(id = taskId, title = "", description = "", type = RecurrenceType.DAILY)
-                        // В реальном приложении здесь нужен запрос к БД по taskId
-                    }
                     return
                 }
                 "SNOOZE_1H" -> {
-                    val am = context.getSystemService(AlarmManager::class.java)
-                    val pi = PendingIntent.getBroadcast(context, taskId.hashCode() + 99, intent.apply { action = null }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                    val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+                    val snoozeIntent = Intent(context, AlarmReceiver::class.java).apply {
+                        putExtra("TASK_ID", taskId)
+                        putExtra("TASK_TITLE", title)
+                        putExtra("TASK_DESC", desc)
+                        putExtra("IS_PRE", isPre)
+                        putExtra("PRE_PREFIX", prePrefix)
+                    }
+                    val pi = PendingIntent.getBroadcast(context, taskId.hashCode() + 99, snoozeIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
                     am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 3600_000L, pi)
                     nm.cancel(taskId.hashCode())
                     return
@@ -203,21 +204,24 @@ class AlarmReceiver : BroadcastReceiver() {
             }
         }
 
-        // Создание уведомления
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel("tasks", "Задачи", NotificationManager.IMPORTANCE_HIGH)
             nm.createNotificationChannel(channel)
         }
 
         val doneIntent = PendingIntent.getBroadcast(context, taskId.hashCode(), Intent(context, AlarmReceiver::class.java).apply { 
-            this.action = "DONE"
+            action = "DONE"
             putExtra("TASK_ID", taskId)
             putExtra("IS_PRE", isPre)
         }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
         val snoozeIntent = PendingIntent.getBroadcast(context, taskId.hashCode() + 100, Intent(context, AlarmReceiver::class.java).apply { 
-            this.action = "SNOOZE_1H"
+            action = "SNOOZE_1H"
             putExtra("TASK_ID", taskId)
+            putExtra("TASK_TITLE", title)
+            putExtra("TASK_DESC", desc)
+            putExtra("IS_PRE", isPre)
+            putExtra("PRE_PREFIX", prePrefix)
         }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
         val displayTitle = if (isPre) "$prePrefix$title" else title
@@ -241,7 +245,7 @@ class AlarmReceiver : BroadcastReceiver() {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val requestPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+        val requestPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ -> }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
@@ -256,9 +260,9 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PeriodicTasksApp(viewModel: TaskViewModel = viewModel()) {
+fun PeriodicTasksApp(taskViewModel: TaskViewModel = viewModel()) {
     var showAddSheet by remember { mutableStateOf(false) }
-    val tasks by viewModel.tasks.collectAsState()
+    val tasks by taskViewModel.tasks.collectAsState()
     val context = LocalContext.current
 
     Scaffold(
@@ -298,7 +302,7 @@ fun PeriodicTasksApp(viewModel: TaskViewModel = viewModel()) {
             ) {
                 AddWizard(
                     onSave = { newTask ->
-                        viewModel.addTask(newTask, context)
+                        taskViewModel.addTask(newTask, context)
                         showAddSheet = false
                     },
                     onCancel = { showAddSheet = false }
@@ -313,7 +317,6 @@ fun PeriodicTasksApp(viewModel: TaskViewModel = viewModel()) {
 fun AddWizard(onSave: (PeriodicTask) -> Unit, onCancel: () -> Unit) {
     var step by remember { mutableIntStateOf(0) }
     
-    // Состояния полей
     var title by remember { mutableStateOf("") }
     var desc by remember { mutableStateOf("") }
     var type by remember { mutableStateOf(RecurrenceType.DAILY) }
@@ -329,11 +332,11 @@ fun AddWizard(onSave: (PeriodicTask) -> Unit, onCancel: () -> Unit) {
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp).navigationBarsPadding()) {
         AnimatedContent(
             targetState = step,
-            transitionSpec = { slideInHorizontally(tween(300)) { it } togetherWith slideOutHorizontally(tween(300)) { -it } }
+            transitionSpec = { slideInHorizontally(tween(300)) { it } togetherWith slideOutHorizontally(tween(300)) { -it } },
+            label = "wizard_animation"
         ) { currentStep ->
             when (currentStep) {
                 0 -> {
-                    // ШАГ 1: Основное
                     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                         Text("Создать напоминание", fontSize = 24.sp, fontWeight = FontWeight.Bold)
                         OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("Название") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp))
@@ -341,7 +344,7 @@ fun AddWizard(onSave: (PeriodicTask) -> Unit, onCancel: () -> Unit) {
                         
                         Text("Повторять:", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp))
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            RecurrenceType.values().forEach { recType ->
+                            RecurrenceType.entries.forEach { recType ->
                                 Row(
                                     modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
                                         .background(if (type == recType) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)
@@ -357,7 +360,6 @@ fun AddWizard(onSave: (PeriodicTask) -> Unit, onCancel: () -> Unit) {
                     }
                 }
                 1 -> {
-                    // ШАГ 2: Дата
                     Column(verticalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxWidth()) {
                         Text("Выберите дату", fontSize = 24.sp, fontWeight = FontWeight.Bold)
                         when (type) {
@@ -386,14 +388,12 @@ fun AddWizard(onSave: (PeriodicTask) -> Unit, onCancel: () -> Unit) {
                     }
                 }
                 2 -> {
-                    // ШАГ 3: Время
                     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
                         Text("Выберите время", fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.Start).padding(bottom = 24.dp))
                         TimePicker(state = timePickerState)
                     }
                 }
                 3 -> {
-                    // ШАГ 4: Заблаговременные уведомления (Только Событие)
                     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                         Text("Заранее напомнить?", fontSize = 24.sp, fontWeight = FontWeight.Bold)
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -423,10 +423,9 @@ fun AddWizard(onSave: (PeriodicTask) -> Unit, onCancel: () -> Unit) {
             
             Button(
                 onClick = {
-                    if (type == RecurrenceType.DAILY && step == 0) step = 2 // Пропускаем выбор даты для Ежедневного
+                    if (type == RecurrenceType.DAILY && step == 0) step = 2 
                     else if (!isLastStep) step++
                     else {
-                        // ФИНАЛ: Сохранение
                         var finalMonth = 1
                         var finalDay = 1
                         if (selectedDateMillis != null) {
